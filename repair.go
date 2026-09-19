@@ -41,6 +41,7 @@ func Repair(data []byte) ([]byte, error) {
 	hasName := false
 	hasPost := false
 	maxGlyphs := uint16(0)
+	unitsPerEm := uint16(cffDefaultUnitsPerEm)
 	cmapIndex := -1
 	for offset := sfntHeaderSize; offset < directoryEnd; offset += sfntTableEntrySize {
 		tag := string(data[offset : offset+4])
@@ -58,6 +59,10 @@ func Repair(data []byte) ([]byte, error) {
 			hasName = true
 		case "post":
 			hasPost = true
+		case "head":
+			if tableLength >= 20 {
+				unitsPerEm = binary.BigEndian.Uint16(tableData[18:20])
+			}
 		case "maxp":
 			if tableLength >= 6 {
 				maxGlyphs = binary.BigEndian.Uint16(tableData[4:6])
@@ -77,7 +82,7 @@ func Repair(data []byte) ([]byte, error) {
 		return data, nil
 	}
 	if !hasOS2 {
-		tables = append(tables, sfntTable{tag: "OS/2", data: minimalOS2Table()})
+		tables = append(tables, sfntTable{tag: "OS/2", data: minimalOS2Table(unitsPerEm)})
 	}
 	if !hasName {
 		tables = append(tables, sfntTable{tag: "name", data: minimalNameTable()})

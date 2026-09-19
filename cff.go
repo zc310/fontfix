@@ -3,9 +3,15 @@ package fontfix
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
+	"strconv"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
+
+// cffDefaultUnitsPerEm is the units-per-em assumed when a bare CFF has no
+// usable FontMatrix. It matches the CFF default FontMatrix of 0.001.
+const cffDefaultUnitsPerEm = 1000
 
 func isBareCFF(data []byte) bool {
 	if len(data) < 4 || data[0] != 1 || data[1] != 0 {
@@ -23,22 +29,194 @@ func wrapCFF(data []byte) ([]byte, error) {
 		return data, fmt.Errorf("invalid bare CFF glyph count %d", numGlyphs)
 	}
 	glyphs := uint16(numGlyphs)
+	// CFF glyph outlines are expressed in 1/FontMatrix[0] units per em, which
+	// is not always 1000 (Type1C subsets such as TimesNewRomanPSMT use 2048).
+	// The generated head/hhea/hmtx/OS2 metrics must use the same scale, or
+	// readers render the glyphs by the wrong factor.
+	unitsPerEm := cffUnitsPerEm(data)
 	cmap := packedGlyphCmap(glyphs)
 	if cidCmap := cffCIDCmap(data, glyphs); len(cidCmap) > 0 {
 		cmap = cidCmap
 	}
 	tables := []sfntTable{
 		{tag: "CFF ", data: data},
-		{tag: "OS/2", data: minimalOS2Table()},
+		{tag: "OS/2", data: minimalOS2Table(unitsPerEm)},
 		{tag: "cmap", data: cmap},
-		{tag: "head", data: buildCFFHeadTable(1000)},
-		{tag: "hhea", data: buildCFFHheaTable(glyphs)},
-		{tag: "hmtx", data: buildCFFHmtxTable(glyphs)},
+		{tag: "head", data: buildCFFHeadTable(unitsPerEm)},
+		{tag: "hhea", data: buildCFFHheaTable(glyphs, unitsPerEm)},
+		{tag: "hmtx", data: buildCFFHmtxTable(glyphs, unitsPerEm)},
 		{tag: "maxp", data: buildCFFMaxpTable(glyphs)},
 		{tag: "name", data: minimalNameTable()},
 		{tag: "post", data: minimalPostTable()},
 	}
 	return rebuildSFNT([]byte("OTTO"), tables), nil
+}
+
+// cffUnitsPerEm returns the units-per-em implied by the CFF Top DICT
+// FontMatrix. The CFF default FontMatrix is 0.001 (1000 units per em), so a
+// missing or invalid matrix falls back to 1000.
+func cffUnitsPerEm(data []byte) uint16 {
+	perEm, ok := cffFontMatrixUnitsPerEm(data)
+	if !ok {
+		return cffDefaultUnitsPerEm
+	}
+	return perEm
+}
+
+func cffFontMatrixUnitsPerEm(data []byte) (uint16, bool) {
+	if len(data) < 4 {
+		return 0, false
+	}
+	offset := int(data[2])
+	_, _, offset, err := cffIndex(data, offset)
+	if err != nil {
+		return 0, false
+	}
+	_, top, _, err := cffIndex(data, offset)
+	if err != nil || len(top) == 0 {
+		return 0, false
+	}
+	scale, ok := cffFontMatrix0(top)
+	if !ok || scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+		return 0, false
+	}
+	units := int(math.Round(1 / scale))
+	if units < 16 || units > 0xffff {
+		return 0, false
+	}
+	return uint16(units), true
+}
+
+// cffFontMatrix0 extracts FontMatrix[0] (Top DICT operator 12 7). Unlike
+// cffDictValue it evaluates real-number operands, which FontMatrix uses.
+func cffFontMatrix0(dict []byte) (float64, bool) {
+	operands := make([]float64, 0, 8)
+	for i := 0; i < len(dict); {
+		b := dict[i]
+		switch {
+		case b == 12:
+			if i+1 >= len(dict) {
+				return 0, false
+			}
+			if int(dict[i+1]) == 7 && len(operands) >= 6 {
+				return operands[len(operands)-6], true
+			}
+			operands = operands[:0]
+			i += 2
+		case b <= 21:
+			operands = operands[:0]
+			i++
+		case b == 28:
+			if i+2 >= len(dict) {
+				return 0, false
+			}
+			operands = append(operands, float64(int16(binary.BigEndian.Uint16(dict[i+1:i+3]))))
+			i += 3
+		case b == 29:
+			if i+4 >= len(dict) {
+				return 0, false
+			}
+			operands = append(operands, float64(int32(binary.BigEndian.Uint32(dict[i+1:i+5]))))
+			i += 5
+		case b == 30:
+			value, next, ok := cffParseReal(dict, i+1)
+			if !ok {
+				return 0, false
+			}
+			operands = append(operands, value)
+			i = next
+		case b >= 32 && b <= 246:
+			operands = append(operands, float64(int(b)-139))
+			i++
+		case b >= 247 && b <= 250:
+			if i+1 >= len(dict) {
+				return 0, false
+			}
+			operands = append(operands, float64((int(b)-247)*256+int(dict[i+1])+108))
+			i += 2
+		case b >= 251 && b <= 254:
+			if i+1 >= len(dict) {
+				return 0, false
+			}
+			operands = append(operands, float64(-(int(b)-251)*256-int(dict[i+1])-108))
+			i += 2
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// cffParseReal decodes a CFF real number starting after the 0x1e byte.
+func cffParseReal(data []byte, start int) (float64, int, bool) {
+	var builder []byte
+	index := start
+	finished := false
+	for index < len(data) && !finished {
+		b := data[index]
+		index++
+		for _, nibble := range []byte{b >> 4, b & 0x0f} {
+			switch {
+			case nibble <= 9:
+				builder = append(builder, '0'+nibble)
+			case nibble == 0x0a:
+				builder = append(builder, '.')
+			case nibble == 0x0b:
+				builder = append(builder, 'E')
+			case nibble == 0x0c:
+				builder = append(builder, 'E', '-')
+			case nibble == 0x0e:
+				builder = append(builder, '-')
+			case nibble == 0x0f:
+				finished = true
+			default:
+				return 0, 0, false
+			}
+			if finished {
+				break
+			}
+		}
+	}
+	if !finished {
+		return 0, 0, false
+	}
+	value, err := strconv.ParseFloat(string(builder), 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	return value, index, true
+}
+
+// scaleCFFMetric scales a non-negative metric from the CFF default 1000
+// units-per-em to the font's actual units-per-em.
+func scaleCFFMetric(value uint16, unitsPerEm uint16) uint16 {
+	if unitsPerEm == 0 || unitsPerEm == cffDefaultUnitsPerEm {
+		return value
+	}
+	scaled := int(math.Round(float64(value) * float64(unitsPerEm) / float64(cffDefaultUnitsPerEm)))
+	if scaled < 0 {
+		return 0
+	}
+	if scaled > 0xffff {
+		return 0xffff
+	}
+	return uint16(scaled)
+}
+
+// scaleCFFSigned scales a signed metric from 1000 units-per-em to the
+// font's actual units-per-em.
+func scaleCFFSigned(value int, unitsPerEm uint16) int16 {
+	if unitsPerEm == 0 || unitsPerEm == cffDefaultUnitsPerEm {
+		return int16(value)
+	}
+	scaled := int(math.Round(float64(value) * float64(unitsPerEm) / float64(cffDefaultUnitsPerEm)))
+	if scaled < -32768 {
+		scaled = -32768
+	}
+	if scaled > 32767 {
+		scaled = 32767
+	}
+	return int16(scaled)
 }
 
 func cffGlyphCount(data []byte) (int, error) {
@@ -312,20 +490,21 @@ func buildCFFHeadTable(unitsPerEm uint16) []byte {
 	return table
 }
 
-func buildCFFHheaTable(numGlyphs uint16) []byte {
+func buildCFFHheaTable(numGlyphs, unitsPerEm uint16) []byte {
 	table := make([]byte, 36)
 	binary.BigEndian.PutUint32(table[0:4], 0x00010000)
-	binary.BigEndian.PutUint16(table[4:6], 800)
-	binary.BigEndian.PutUint16(table[6:8], 0xff38)
-	binary.BigEndian.PutUint16(table[10:12], 1000)
+	binary.BigEndian.PutUint16(table[4:6], scaleCFFMetric(800, unitsPerEm))
+	binary.BigEndian.PutUint16(table[6:8], uint16(scaleCFFSigned(-200, unitsPerEm)))
+	binary.BigEndian.PutUint16(table[10:12], scaleCFFMetric(1000, unitsPerEm))
 	binary.BigEndian.PutUint16(table[34:36], numGlyphs)
 	return table
 }
 
-func buildCFFHmtxTable(numGlyphs uint16) []byte {
+func buildCFFHmtxTable(numGlyphs, unitsPerEm uint16) []byte {
+	advance := scaleCFFMetric(500, unitsPerEm)
 	table := make([]byte, int(numGlyphs)*4)
 	for i := 0; i < int(numGlyphs); i++ {
-		binary.BigEndian.PutUint16(table[i*4:i*4+2], 500)
+		binary.BigEndian.PutUint16(table[i*4:i*4+2], advance)
 	}
 	return table
 }

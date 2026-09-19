@@ -21,20 +21,20 @@ type sfntRecord struct {
 	offset int
 }
 
-func minimalOS2Table() []byte {
+func minimalOS2Table(unitsPerEm uint16) []byte {
 	table := make([]byte, 96)
 	binary.BigEndian.PutUint16(table[0:2], 2)
-	binary.BigEndian.PutUint16(table[2:4], 500)
+	binary.BigEndian.PutUint16(table[2:4], scaleCFFMetric(500, unitsPerEm))
 	binary.BigEndian.PutUint16(table[4:6], 400)
 	binary.BigEndian.PutUint16(table[6:8], 5)
 	copy(table[58:62], "PfEd")
 	binary.BigEndian.PutUint16(table[62:64], 0x0040)
 	binary.BigEndian.PutUint16(table[64:66], 0)
 	binary.BigEndian.PutUint16(table[66:68], 255)
-	binary.BigEndian.PutUint16(table[68:70], 800)
-	binary.BigEndian.PutUint16(table[70:72], uint16(0xff38))
-	binary.BigEndian.PutUint16(table[74:76], 800)
-	binary.BigEndian.PutUint16(table[76:78], 200)
+	binary.BigEndian.PutUint16(table[68:70], scaleCFFMetric(800, unitsPerEm))
+	binary.BigEndian.PutUint16(table[70:72], uint16(scaleCFFSigned(-200, unitsPerEm)))
+	binary.BigEndian.PutUint16(table[74:76], scaleCFFMetric(800, unitsPerEm))
+	binary.BigEndian.PutUint16(table[76:78], scaleCFFMetric(200, unitsPerEm))
 	return table
 }
 
