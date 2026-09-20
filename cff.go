@@ -38,6 +38,7 @@ func wrapCFF(data []byte) ([]byte, error) {
 	if cidCmap := cffCIDCmap(data, glyphs); len(cidCmap) > 0 {
 		cmap = cidCmap
 	}
+	data = fixHintMaskOperators(data)
 	tables := []sfntTable{
 		{tag: "CFF ", data: data},
 		{tag: "OS/2", data: minimalOS2Table(unitsPerEm)},
@@ -514,4 +515,143 @@ func buildCFFMaxpTable(numGlyphs uint16) []byte {
 	binary.BigEndian.PutUint32(table[0:4], 0x00005000)
 	binary.BigEndian.PutUint16(table[4:6], numGlyphs)
 	return table
+}
+
+// fixHintMaskOperators 把 CharStrings 中的 cntrmask 操作符改写为 hintmask。
+//
+// 一些 CFF 解析器（如 tdewolff/font）在遇到 cntrmask 时不会把其前面的隐式
+// vstem 操作数计入 hint 数量，导致后续 hintmask 掩码字节长度计算错误，字符
+// 串解析错位并丢失字形轮廓（表现为个别文字空白）。cntrmask 与 hintmask 长度
+// 相同、语义只在命中信息上有区别，而本库总是以 NoHinting 渲染，因此把
+// cntrmask 改写为 hintmask 可让解析器按正确分支处理隐式 vstem，且不影响外观。
+func fixHintMaskOperators(src []byte) []byte {
+	entries, err := cffCharStringsEntries(src)
+	if err != nil || len(entries) == 0 {
+		return src
+	}
+	out := append([]byte(nil), src...)
+	fixed, err := cffCharStringsEntries(out)
+	if err != nil {
+		return src
+	}
+	for _, charstring := range fixed {
+		rewriteCntrMaskOperators(charstring)
+	}
+	return out
+}
+
+// rewriteCntrMaskOperators 就地扫描单个 Type2 CharString，把操作符位置上的
+// cntrmask(20) 改写为 hintmask(19)，同时按正确的 hint 数量跳过掩码字节。
+func rewriteCntrMaskOperators(charstring []byte) {
+	hints := 0
+	operands := 0
+	for i := 0; i < len(charstring); {
+		b := charstring[i]
+		switch {
+		case b == 28:
+			i += 3
+			operands++
+		case b == 255:
+			i += 5
+			operands++
+		case b >= 247 && b <= 254:
+			i += 2
+			operands++
+		case b >= 32:
+			i++
+			operands++
+		case b == 12:
+			i += 2
+			operands = 0
+		default:
+			switch b {
+			case 1, 3, 18, 23: // hstem/vstem/hstemhm/vstemhm
+				hints += operands / 2
+				operands = 0
+			case 19, 20: // hintmask/cntrmask，前面操作数为隐式 vstemhm
+				hints += operands / 2
+				operands = 0
+				if b == 20 {
+					charstring[i] = 19
+				}
+				i += 1 + (hints+7)/8
+				continue
+			default:
+				operands = 0
+			}
+			i++
+		}
+	}
+}
+
+// cffCharStringsEntries 返回 bare CFF 中每个 CharString 的字节切片（指向 data）。
+func cffCharStringsEntries(data []byte) ([][]byte, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("cff header is truncated")
+	}
+	headerSize := int(data[2])
+	if headerSize < 4 || headerSize > len(data) {
+		return nil, fmt.Errorf("invalid cff header size %d", headerSize)
+	}
+	_, _, offset, err := cffIndex(data, headerSize) // Name INDEX
+	if err != nil {
+		return nil, err
+	}
+	_, top, offset, err := cffIndex(data, offset) // Top DICT INDEX
+	if err != nil {
+		return nil, err
+	}
+	_, _, offset, err = cffIndex(data, offset) // String INDEX
+	if err != nil {
+		return nil, err
+	}
+	_, _, offset, err = cffIndex(data, offset) // Global Subr INDEX
+	if err != nil {
+		return nil, err
+	}
+	charStringsOffset, ok := cffDictValue(top, 17)
+	if !ok {
+		return nil, fmt.Errorf("cff CharStrings offset not found")
+	}
+	return cffIndexEntries(data, charStringsOffset)
+}
+
+// cffIndexEntries 返回 INDEX 中每个条目的字节切片（指向 data）。
+func cffIndexEntries(data []byte, offset int) ([][]byte, error) {
+	if offset < 0 || offset+2 > len(data) {
+		return nil, fmt.Errorf("index header is truncated")
+	}
+	count := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+	if count == 0 {
+		return nil, nil
+	}
+	if offset+3 > len(data) {
+		return nil, fmt.Errorf("index offset size is missing")
+	}
+	offSize := int(data[offset+2])
+	if offSize < 1 || offSize > 4 {
+		return nil, fmt.Errorf("invalid index offset size %d", offSize)
+	}
+	offsetsStart := offset + 3
+	dataStart := offsetsStart + (count+1)*offSize
+	if dataStart > len(data) {
+		return nil, fmt.Errorf("index offsets are truncated")
+	}
+	readOffset := func(pos int) int {
+		value := 0
+		for i := 0; i < offSize; i++ {
+			value = value<<8 | int(data[pos+i])
+		}
+		return value
+	}
+	entries := make([][]byte, 0, count)
+	for i := 0; i < count; i++ {
+		start := readOffset(offsetsStart + i*offSize)
+		end := readOffset(offsetsStart + (i+1)*offSize)
+		if start < 1 || end < start || dataStart+end-1 > len(data) {
+			return nil, fmt.Errorf("index entry %d is out of bounds", i)
+		}
+		entries = append(entries, data[dataStart+start-1:dataStart+end-1])
+	}
+	return entries, nil
 }
