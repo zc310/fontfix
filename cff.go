@@ -34,6 +34,7 @@ func wrapCFF(data []byte) ([]byte, error) {
 	// The generated head/hhea/hmtx/OS2 metrics must use the same scale, or
 	// readers render the glyphs by the wrong factor.
 	unitsPerEm := cffUnitsPerEm(data)
+	advances := cffGlyphAdvances(data, int(glyphs))
 	cmap := packedGlyphCmap(glyphs)
 	if cidCmap := cffCIDCmap(data, glyphs); len(cidCmap) > 0 {
 		cmap = cidCmap
@@ -45,7 +46,7 @@ func wrapCFF(data []byte) ([]byte, error) {
 		{tag: "cmap", data: cmap},
 		{tag: "head", data: buildCFFHeadTable(unitsPerEm)},
 		{tag: "hhea", data: buildCFFHheaTable(glyphs, unitsPerEm)},
-		{tag: "hmtx", data: buildCFFHmtxTable(glyphs, unitsPerEm)},
+		{tag: "hmtx", data: buildCFFHmtxTable(advances, glyphs, unitsPerEm)},
 		{tag: "maxp", data: buildCFFMaxpTable(glyphs)},
 		{tag: "name", data: minimalNameTable()},
 		{tag: "post", data: minimalPostTable()},
@@ -501,10 +502,13 @@ func buildCFFHheaTable(numGlyphs, unitsPerEm uint16) []byte {
 	return table
 }
 
-func buildCFFHmtxTable(numGlyphs, unitsPerEm uint16) []byte {
-	advance := scaleCFFMetric(500, unitsPerEm)
+func buildCFFHmtxTable(advances []uint16, numGlyphs, unitsPerEm uint16) []byte {
 	table := make([]byte, int(numGlyphs)*4)
 	for i := 0; i < int(numGlyphs); i++ {
+		advance := scaleCFFMetric(500, unitsPerEm) // 解析失败时的保守回退
+		if i < len(advances) {
+			advance = advances[i]
+		}
 		binary.BigEndian.PutUint16(table[i*4:i*4+2], advance)
 	}
 	return table

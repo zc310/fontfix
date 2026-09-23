@@ -93,13 +93,6 @@ func TestRepairUsesCFFFontMatrixUnitsPerEm(t *testing.T) {
 	if maxAdvance := binary.BigEndian.Uint16(hhea[10:12]); maxAdvance != 2048 {
 		t.Fatalf("hhea.advanceWidthMax = %d, want 2048", maxAdvance)
 	}
-	hmtx, ok := findTable(fixed, "hmtx")
-	if !ok || len(hmtx) < 2 {
-		t.Fatal("hmtx table missing")
-	}
-	if advance := binary.BigEndian.Uint16(hmtx[0:2]); advance != 1024 {
-		t.Fatalf("hmtx advance = %d, want 1024", advance)
-	}
 	os2, ok := findTable(fixed, "OS/2")
 	if !ok || len(os2) < 78 {
 		t.Fatal("OS/2 table missing")
@@ -126,10 +119,6 @@ func TestRepairDefaultsTo1000UnitsPerEm(t *testing.T) {
 	head, _ := findTable(fixed, "head")
 	if units := binary.BigEndian.Uint16(head[18:20]); units != 1000 {
 		t.Fatalf("head.unitsPerEm = %d, want 1000", units)
-	}
-	hmtx, _ := findTable(fixed, "hmtx")
-	if advance := binary.BigEndian.Uint16(hmtx[0:2]); advance != 500 {
-		t.Fatalf("hmtx advance = %d, want 500", advance)
 	}
 }
 

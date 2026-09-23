@@ -106,3 +106,33 @@ func packedGlyphRange(data []byte, field int) uint32 {
 	}
 	return 0
 }
+
+func TestRepairWithGlyphsReplacesStaleGlyphMapping(t *testing.T) {
+	// 字体可能已有「陈旧」的 Unicode→字形映射（例如 CID CFF 由 cffCIDCmap 补入
+	// 的 Adobe-GB1 标准 CID→Unicode 映射）。调用方用文档权威映射覆盖同一字形
+	// 时，必须移除旧码位，否则字体 cmap 反查（GlyphToUnicode）会按码位大小返回
+	// 陈旧码位，使 PDF ToUnicode 把文字提取成错误字符。
+	base := testFontWithoutPackedGlyphCmap()
+	base, err := replaceTable(base, "cmap", cmapFromPairs([]cmapPair{{code: 'A', glyph: 2}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := RepairWithGlyphs(base, []GlyphMapping{{Rune: 'B', Glyph: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	glyphs := make(map[uint32]uint16)
+	for _, pair := range parseCMapPairs(fixed) {
+		glyphs[pair.code] = pair.glyph
+	}
+	if glyph, ok := glyphs[uint32('A')]; ok {
+		t.Fatalf("stale mapping cmap['A'] still present: %d", glyph)
+	}
+	if glyphs[uint32('B')] != 2 {
+		t.Fatalf("cmap['B'] = %d, want 2", glyphs[uint32('B')])
+	}
+	if glyphs[uint32(packedGlyphBase)+2] != 2 {
+		t.Fatalf("PUA mapping lost: cmap[PUA+2] = %d", glyphs[uint32(packedGlyphBase)+2])
+	}
+}

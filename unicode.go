@@ -58,11 +58,24 @@ func RepairWithGlyphs(data []byte, mappings []GlyphMapping) ([]byte, error) {
 		return value
 	}
 
+	// 调用方映射是文档的权威映射：同一字形若还存在其它 Unicode 码位映射
+	// （例如 CID CFF 由 cffCIDCmap 补入的 Adobe-GB1 标准 CID→Unicode 映射），
+	// 必须移除。否则字体 cmap 反查（GlyphToUnicode）会按码位大小返回陈旧码位，
+	// 使 PDF ToUnicode 把文字提取成错误字符。私有区映射（packedGlyphBase+CID）
+	// 用于按字形 ID 渲染，予以保留。
+	overrideGlyph := make(map[uint16]uint32, len(overrides))
+	for code, glyph := range overrides {
+		overrideGlyph[resolve(glyph)] = code
+	}
 	merged := make([]cmapPair, 0, len(pairs)+len(overrides))
 	seen := make(map[uint32]bool, len(pairs)+len(overrides))
 	for _, pair := range pairs {
 		if glyph, ok := overrides[pair.code]; ok {
 			pair.glyph = resolve(glyph)
+		} else if pair.code < uint32(packedGlyphBase) {
+			if code, ok := overrideGlyph[pair.glyph]; ok && code != pair.code {
+				continue
+			}
 		}
 		if seen[pair.code] {
 			continue
