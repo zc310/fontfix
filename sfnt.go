@@ -50,46 +50,77 @@ func minimalPostTable() []byte {
 	return table
 }
 
+// rebuildSFNT 按表目录重排字体并输出新字节。
+//
+// 每张表只被复制一次：先算出总长度并分配结果缓冲，写入表内容后再从结果缓冲
+// 计算校验和并回填表目录。表内容可以是来源缓冲的子切片，因此本函数不得改写
+// tables 中任何表内容——head 的 checksumAdjustment 字段在结果缓冲上清零。
 func rebuildSFNT(scaler []byte, tables []sfntTable) []byte {
-	result := bytes.NewBuffer(make([]byte, 0, sfntHeaderSize+len(tables)*sfntTableEntrySize))
-	result.Write(scaler)
-	writeUint16(result, uint16(len(tables)))
+	total := sfntHeaderSize + len(tables)*sfntTableEntrySize
+	for _, table := range tables {
+		total += paddedLength(len(table.data))
+	}
+	result := make([]byte, total)
+
+	copy(result, scaler)
+	pos := len(scaler)
+	putUint16(result[pos:], uint16(len(tables)))
+	pos += 2
 	entrySelector := 0
 	for 1<<(entrySelector+1) <= len(tables) {
 		entrySelector++
 	}
 	searchRange := 1 << (entrySelector + 4)
-	writeUint16(result, uint16(searchRange))
-	writeUint16(result, uint16(entrySelector))
-	writeUint16(result, uint16(len(tables)*sfntTableEntrySize-searchRange))
+	putUint16(result[pos:], uint16(searchRange))
+	pos += 2
+	putUint16(result[pos:], uint16(entrySelector))
+	pos += 2
+	putUint16(result[pos:], uint16(len(tables)*sfntTableEntrySize-searchRange))
+	pos += 2
 
-	tableOffset := sfntHeaderSize + len(tables)*sfntTableEntrySize
+	// 先写入表内容并记录偏移；表目录暂时留空，待校验和算好后回填。
 	records := make([]sfntRecord, 0, len(tables))
 	for _, table := range tables {
-		if table.tag == "head" && len(table.data) >= 12 {
-			binary.BigEndian.PutUint32(table.data[8:12], 0)
+		offset := sfntHeaderSize + len(tables)*sfntTableEntrySize
+		if len(records) > 0 {
+			offset = records[len(records)-1].offset + paddedLength(len(records[len(records)-1].data))
 		}
-		records = append(records, sfntRecord{tag: table.tag, data: table.data, offset: tableOffset})
-		tableOffset += paddedLength(len(table.data))
-	}
-	for _, record := range records {
-		result.WriteString(record.tag)
-		writeUint32(result, tableChecksum(record.data))
-		writeUint32(result, uint32(record.offset))
-		writeUint32(result, uint32(len(record.data)))
-	}
-	for _, record := range records {
-		result.Write(record.data)
-		result.Write(make([]byte, paddedLength(len(record.data))-len(record.data)))
+		copy(result[offset:], table.data)
+		records = append(records, sfntRecord{tag: table.tag, data: table.data, offset: offset})
 	}
 
-	fixed := result.Bytes()
-	fixHeadChecksumAdjustment(fixed, records)
-	return fixed
+	// head 的 checksumAdjustment 必须以 0 参与表校验和与整字体校验和的计算。
+	// 条件按 head 表自身长度判断：畸形字体里 head 可能短于 12 字节，此时若按
+	// 整字体长度判断，写入位置会越过 head 表边界、破坏相邻表数据。
+	for _, record := range records {
+		if record.tag == "head" && len(record.data) >= 12 {
+			putUint32(result[record.offset+8:], 0)
+		}
+	}
+
+	dir := sfntHeaderSize
+	for _, record := range records {
+		copy(result[dir:], record.tag)
+		putUint32(result[dir+4:], tableChecksum(result[record.offset:record.offset+len(record.data)]))
+		putUint32(result[dir+8:], uint32(record.offset))
+		putUint32(result[dir+12:], uint32(len(record.data)))
+		dir += sfntTableEntrySize
+	}
+
+	fixHeadChecksumAdjustment(result, records)
+	return result
 }
 
 func paddedLength(length int) int {
 	return (length + 3) &^ 3
+}
+
+func putUint16(buf []byte, value uint16) {
+	binary.BigEndian.PutUint16(buf, value)
+}
+
+func putUint32(buf []byte, value uint32) {
+	binary.BigEndian.PutUint32(buf, value)
 }
 
 func writeUint16(buf *bytes.Buffer, value uint16) {
@@ -100,26 +131,35 @@ func writeUint32(buf *bytes.Buffer, value uint32) {
 	_ = binary.Write(buf, binary.BigEndian, value)
 }
 
+// tableChecksum 按大端 4 字节字累加表校验和。整字走 binary.BigEndian，
+// 尾部不足 4 字节时右侧补零（与逐字节左对齐累加等价）。校验和要对整张表
+// 逐字节扫描，是重建 SFNT 时最热的循环之一。
 func tableChecksum(data []byte) uint32 {
 	var sum uint32
-	for offset := 0; offset < len(data); offset += 4 {
+	offset := 0
+	for ; offset+4 <= len(data); offset += 4 {
+		sum += binary.BigEndian.Uint32(data[offset : offset+4])
+	}
+	if offset < len(data) {
 		var word uint32
-		for i := 0; i < 4 && offset+i < len(data); i++ {
-			word |= uint32(data[offset+i]) << uint(24-8*i)
+		for i := offset; i < len(data); i++ {
+			word |= uint32(data[i]) << uint(24-8*(i-offset))
 		}
 		sum += word
 	}
 	return sum
 }
 
+// fixHeadChecksumAdjustment 在结果缓冲上回填 head 的 checksumAdjustment。
+// 调用前 head 的该字段已被清零，整字体校验和因此与规范一致。
 func fixHeadChecksumAdjustment(data []byte, records []sfntRecord) {
 	for _, record := range records {
-		if record.tag != "head" || record.offset+12 > len(data) {
+		if record.tag != "head" || len(record.data) < 12 || record.offset+12 > len(data) {
 			continue
 		}
-		binary.BigEndian.PutUint32(data[record.offset+8:record.offset+12], 0)
+		putUint32(data[record.offset+8:], 0)
 		checksum := tableChecksum(data)
-		binary.BigEndian.PutUint32(data[record.offset+8:record.offset+12], 0xB1B0AFBA-checksum)
+		putUint32(data[record.offset+8:], 0xB1B0AFBA-checksum)
 		return
 	}
 }

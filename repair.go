@@ -8,7 +8,8 @@ package fontfix
 import (
 	"encoding/binary"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 )
 
 // Repair adds a minimal OS/2 table when an SFNT font is missing it and adds a
@@ -50,7 +51,9 @@ func Repair(data []byte) ([]byte, error) {
 		if tableOffset > len(data) || tableLength > len(data)-tableOffset {
 			return data, fmt.Errorf("font table %q is out of bounds", tag)
 		}
-		tableData := append([]byte(nil), data[tableOffset:tableOffset+tableLength]...)
+		// 表内容先取引用：rebuildSFNT 只把表写入新的结果缓冲，不会改写这里，
+		// 因此无需为每张表额外分配一份副本。
+		tableData := data[tableOffset : tableOffset+tableLength]
 		tables = append(tables, sfntTable{tag: tag, data: tableData})
 		switch tag {
 		case "OS/2":
@@ -93,7 +96,7 @@ func Repair(data []byte) ([]byte, error) {
 	if needsGlyphMap {
 		tables[cmapIndex].data = addPackedGlyphMap(tables[cmapIndex].data, maxGlyphs)
 	}
-	sort.Slice(tables, func(i, j int) bool { return tables[i].tag < tables[j].tag })
+	slices.SortFunc(tables, func(a, b sfntTable) int { return strings.Compare(a.tag, b.tag) })
 
 	return rebuildSFNT(data[:4], tables), nil
 }

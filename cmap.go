@@ -3,7 +3,7 @@ package fontfix
 import (
 	"bytes"
 	"encoding/binary"
-	"sort"
+	"slices"
 )
 
 const packedGlyphBase rune = 0xF0000
@@ -60,7 +60,7 @@ func addPackedGlyphMap(data []byte, numGlyphs uint16) []byte {
 			tableOffsets = append(tableOffsets, subtable)
 		}
 	}
-	sort.Ints(tableOffsets)
+	slices.Sort(tableOffsets)
 	uniqueOffsets := tableOffsets[:0]
 	for _, offset := range tableOffsets {
 		if len(uniqueOffsets) == 0 || uniqueOffsets[len(uniqueOffsets)-1] != offset {
@@ -184,7 +184,17 @@ func format12Subtable(pairs []cmapPair) []byte {
 	if len(pairs) == 0 {
 		return nil
 	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].code < pairs[j].code })
+	// 以 code 为首键、glyph 为次键构成全序：slices.SortFunc 不稳定，补上次键
+	// 才能让相同 code 的输入得到确定输出。
+	slices.SortFunc(pairs, func(a, b cmapPair) int {
+		if a.code != b.code {
+			if a.code < b.code {
+				return -1
+			}
+			return 1
+		}
+		return int(a.glyph) - int(b.glyph)
+	})
 	type group struct {
 		startCode uint32
 		endCode   uint32

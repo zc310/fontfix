@@ -3,7 +3,8 @@ package fontfix
 import (
 	"encoding/binary"
 	"errors"
-	"sort"
+	"slices"
+	"strings"
 )
 
 var errTruncated = errors.New("font table directory is truncated")
@@ -262,11 +263,12 @@ func replaceTable(data []byte, tag string, replacement []byte) ([]byte, error) {
 			replaced = true
 			continue
 		}
-		tables = append(tables, sfntTable{tag: current, data: append([]byte(nil), data[offset:offset+length]...)})
+		// 未替换的表取引用即可：rebuildSFNT 不会改写表内容。
+		tables = append(tables, sfntTable{tag: current, data: data[offset : offset+length]})
 	}
 	if !replaced {
 		tables = append(tables, sfntTable{tag: tag, data: append([]byte(nil), replacement...)})
 	}
-	sort.Slice(tables, func(i, j int) bool { return tables[i].tag < tables[j].tag })
+	slices.SortFunc(tables, func(a, b sfntTable) int { return strings.Compare(a.tag, b.tag) })
 	return rebuildSFNT(data[:4], tables), nil
 }

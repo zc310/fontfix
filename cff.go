@@ -348,6 +348,24 @@ func cffDictValue(data []byte, wantedOperator int) (int, bool) {
 	return 0, false
 }
 
+// cffCIDKeyed 判断 CFF 数据是否为 CID 字体：Top DICT 含 CIDCount(1230) 算子。
+func cffCIDKeyed(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	offset := int(data[2])
+	_, _, offset, err := cffIndex(data, offset)
+	if err != nil {
+		return false
+	}
+	_, top, _, err := cffIndex(data, offset)
+	if err != nil {
+		return false
+	}
+	_, ok := cffDictValue(top, 1230)
+	return ok
+}
+
 func cffCIDCmap(data []byte, numGlyphs uint16) []byte {
 	if len(data) < 4 {
 		return nil
