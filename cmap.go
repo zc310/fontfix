@@ -78,12 +78,25 @@ func addPackedGlyphMap(data []byte, numGlyphs uint16) []byte {
 		}
 	}
 
-	packed := make([]byte, 28)
-	binary.BigEndian.PutUint16(packed[0:2], 12)
-	binary.BigEndian.PutUint32(packed[4:8], uint32(len(packed)))
-	binary.BigEndian.PutUint32(packed[12:16], 1)
-	binary.BigEndian.PutUint32(packed[16:20], uint32(packedGlyphBase))
-	binary.BigEndian.PutUint32(packed[20:24], uint32(packedGlyphBase)+uint32(numGlyphs)-1)
+	// 整形器（HarfBuzz）只使用优先级最高的一张 cmap 子表，(3,10) 排在 (0,3)
+	// 之前。若这里只写入私有区字形引用，整形器就会改用该子表并把所有真实
+	// 字符映射为 .notdef，渲染结果是一片方框。因此合成的 format 12 必须同时
+	// 覆盖字体原有码位与私有区字形引用。
+	byCode := make(map[uint32]uint16, int(numGlyphs))
+	for _, pair := range cmapUnicodePairs(data) {
+		byCode[pair.code] = pair.glyph
+	}
+	for glyphID := 0; glyphID < int(numGlyphs); glyphID++ {
+		code := uint32(packedGlyphBase) + uint32(glyphID)
+		if _, ok := byCode[code]; !ok {
+			byCode[code] = uint16(glyphID)
+		}
+	}
+	pairs := make([]cmapPair, 0, len(byCode))
+	for code, glyphID := range byCode {
+		pairs = append(pairs, cmapPair{code: code, glyph: glyphID})
+	}
+	packed := format12Subtable(pairs)
 
 	result := bytes.NewBuffer(make([]byte, 0, len(data)+len(packed)+8))
 	writeUint16(result, binary.BigEndian.Uint16(data[0:2]))
@@ -137,7 +150,37 @@ type cmapPair struct {
 	glyph uint16
 }
 
-func cmapFromPairs(pairs []cmapPair) []byte {
+// cmapUnicodePairs 提取 cmap 表中 format 4 与 format 12 子表的码位映射，
+// 忽略 Macintosh 传统编码子表，因为它们的码位不等于 Unicode 标量值。
+func cmapUnicodePairs(cmap []byte) []cmapPair {
+	if len(cmap) < 4 {
+		return nil
+	}
+	numTables := int(binary.BigEndian.Uint16(cmap[2:4]))
+	pairs := make([]cmapPair, 0)
+	parsed := make(map[uint32]bool)
+	for i := 0; i < numTables; i++ {
+		record := 4 + i*8
+		if record+8 > len(cmap) {
+			break
+		}
+		offset := int(binary.BigEndian.Uint32(cmap[record+4 : record+8]))
+		if offset < 0 || offset+2 > len(cmap) || parsed[uint32(offset)] {
+			continue
+		}
+		parsed[uint32(offset)] = true
+		switch binary.BigEndian.Uint16(cmap[offset : offset+2]) {
+		case 4:
+			pairs = append(pairs, parseCMapFormat4(cmap[offset:])...)
+		case 12:
+			pairs = append(pairs, parseCMapFormat12(cmap[offset:])...)
+		}
+	}
+	return pairs
+}
+
+// format12Subtable 把码位映射合并为连续分组并生成 format 12 子表。
+func format12Subtable(pairs []cmapPair) []byte {
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -159,15 +202,9 @@ func cmapFromPairs(pairs []cmapPair) []byte {
 		groups = append(groups, group{startCode: pair.code, endCode: pair.code, startGID: uint32(pair.glyph)})
 	}
 
-	subtableLength := 16 + len(groups)*12
-	cmap := make([]byte, 12+subtableLength)
-	binary.BigEndian.PutUint16(cmap[2:4], 1)
-	binary.BigEndian.PutUint16(cmap[4:6], 3)
-	binary.BigEndian.PutUint16(cmap[6:8], 10)
-	binary.BigEndian.PutUint32(cmap[8:12], 12)
-	subtable := cmap[12:]
+	subtable := make([]byte, 16+len(groups)*12)
 	binary.BigEndian.PutUint16(subtable[0:2], 12)
-	binary.BigEndian.PutUint32(subtable[4:8], uint32(subtableLength))
+	binary.BigEndian.PutUint32(subtable[4:8], uint32(len(subtable)))
 	binary.BigEndian.PutUint32(subtable[12:16], uint32(len(groups)))
 	for i, group := range groups {
 		pos := 16 + i*12
@@ -175,5 +212,19 @@ func cmapFromPairs(pairs []cmapPair) []byte {
 		binary.BigEndian.PutUint32(subtable[pos+4:pos+8], group.endCode)
 		binary.BigEndian.PutUint32(subtable[pos+8:pos+12], group.startGID)
 	}
+	return subtable
+}
+
+func cmapFromPairs(pairs []cmapPair) []byte {
+	subtable := format12Subtable(pairs)
+	if subtable == nil {
+		return nil
+	}
+	cmap := make([]byte, 12+len(subtable))
+	binary.BigEndian.PutUint16(cmap[2:4], 1)
+	binary.BigEndian.PutUint16(cmap[4:6], 3)
+	binary.BigEndian.PutUint16(cmap[6:8], 10)
+	binary.BigEndian.PutUint32(cmap[8:12], 12)
+	copy(cmap[12:], subtable)
 	return cmap
 }
