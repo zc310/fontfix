@@ -136,3 +136,103 @@ func TestRepairWithGlyphsReplacesStaleGlyphMapping(t *testing.T) {
 		t.Fatalf("PUA mapping lost: cmap[PUA+2] = %d", glyphs[uint32(packedGlyphBase)+2])
 	}
 }
+
+// format12Glyphs 读取 cmap 中 (3,10) format 12 子表的码位到字形映射。
+func format12Glyphs(cmap []byte) map[uint32]uint16 {
+	glyphs := map[uint32]uint16{}
+	numTables := int(binary.BigEndian.Uint16(cmap[2:4]))
+	for i := 0; i < numTables; i++ {
+		record := 4 + i*8
+		if record+8 > len(cmap) {
+			break
+		}
+		offset := int(binary.BigEndian.Uint32(cmap[record+4 : record+8]))
+		if offset+16 > len(cmap) || binary.BigEndian.Uint16(cmap[offset:offset+2]) != 12 {
+			continue
+		}
+		groups := int(binary.BigEndian.Uint32(cmap[offset+12 : offset+16]))
+		for group := 0; group < groups; group++ {
+			pos := offset + 16 + group*12
+			if pos+12 > len(cmap) {
+				break
+			}
+			start := binary.BigEndian.Uint32(cmap[pos : pos+4])
+			end := binary.BigEndian.Uint32(cmap[pos+4 : pos+8])
+			gid := binary.BigEndian.Uint32(cmap[pos+8 : pos+12])
+			for code := start; code <= end && code-start < 0x10000; code++ {
+				glyphs[code] = uint16(gid + (code - start))
+			}
+		}
+	}
+	return glyphs
+}
+
+// testFormat4Subtable 生成把 U+56FD、U+6587 映射到字形 1、2 的 format 4 子表。
+func testFormat4Subtable() []byte {
+	const segCount = 3
+	subtable := make([]byte, 16+segCount*8)
+	binary.BigEndian.PutUint16(subtable[0:2], 4)
+	binary.BigEndian.PutUint16(subtable[2:4], uint16(len(subtable)))
+	binary.BigEndian.PutUint16(subtable[4:6], 0) // language
+	binary.BigEndian.PutUint16(subtable[6:8], segCount*2)
+	binary.BigEndian.PutUint16(subtable[8:10], 2)  // searchRange
+	binary.BigEndian.PutUint16(subtable[10:12], 0) // entrySelector
+	binary.BigEndian.PutUint16(subtable[12:14], 0) // rangeShift
+	endCode := subtable[14 : 14+segCount*2]
+	binary.BigEndian.PutUint16(endCode[0:2], 0x56FD)
+	binary.BigEndian.PutUint16(endCode[2:4], 0x6587)
+	binary.BigEndian.PutUint16(endCode[4:6], 0xFFFF)
+	startCode := subtable[14+segCount*2+2 : 14+segCount*4+2]
+	binary.BigEndian.PutUint16(startCode[0:2], 0x56FD)
+	binary.BigEndian.PutUint16(startCode[2:4], 0x6587)
+	binary.BigEndian.PutUint16(startCode[4:6], 0xFFFF)
+	idDelta := subtable[14+segCount*4+2 : 14+segCount*6+2]
+	binary.BigEndian.PutUint16(idDelta[0:2], 0x10001-0x56FD)
+	binary.BigEndian.PutUint16(idDelta[2:4], 0x10002-0x6587)
+	binary.BigEndian.PutUint16(idDelta[4:6], 1)
+	return subtable
+}
+
+// TestRepairKeepsUnicodeInPackedCmap 验证合成的 (3,10) 子表同时覆盖字体原有
+// 码位与私有区字形引用。整形器只使用优先级最高的一张 cmap 子表，而 (3,10)
+// 排在 (0,3) 之前；若合成子表仅含私有区，真实字符会全部变成 .notdef 方框。
+func TestRepairKeepsUnicodeInPackedCmap(t *testing.T) {
+	head := make([]byte, 12)
+	maxp := make([]byte, 6)
+	binary.BigEndian.PutUint16(maxp[4:6], 3)
+
+	format4 := testFormat4Subtable()
+	cmap := make([]byte, 12+len(format4))
+	binary.BigEndian.PutUint16(cmap[2:4], 1)
+	binary.BigEndian.PutUint16(cmap[4:6], 0) // platformID: Unicode
+	binary.BigEndian.PutUint16(cmap[6:8], 3) // encodingID: BMP
+	binary.BigEndian.PutUint32(cmap[8:12], 12)
+	copy(cmap[12:], format4)
+
+	fixed, err := Repair(buildSFNT([]sfntTestTable{
+		{tag: "head", data: head},
+		{tag: "maxp", data: maxp},
+		{tag: "cmap", data: cmap},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixedCmap, ok := findTable(fixed, "cmap")
+	if !ok {
+		t.Fatal("cmap table was removed")
+	}
+	if !hasPackedGlyphMap(fixedCmap) {
+		t.Fatal("packed glyph cmap was not added")
+	}
+	glyphs := format12Glyphs(fixedCmap)
+	for _, code := range []uint32{0x56FD, 0x6587} {
+		if glyphs[code] == 0 {
+			t.Errorf("U+%04X missing from the synthesized (3,10) subtable", code)
+		}
+	}
+	for glyphID := uint32(0); glyphID < 3; glyphID++ {
+		if got := glyphs[uint32(packedGlyphBase)+glyphID]; got != uint16(glyphID) {
+			t.Errorf("cmap[PUA+%d] = %d, want %d", glyphID, got, glyphID)
+		}
+	}
+}
