@@ -40,7 +40,7 @@ func TestAdobeGB1CIDToUnicode(t *testing.T) {
 		2785: '\u5bc6',
 		4647: '\u8d44',
 	} {
-		if got, ok := adobeGB1CIDToUnicode(cid); !ok || got != want {
+		if got, ok := AdobeGB1CIDToUnicode(cid); !ok || got != want {
 			t.Fatalf("CID %d = %q, %v; want %q", cid, got, ok, want)
 		}
 	}

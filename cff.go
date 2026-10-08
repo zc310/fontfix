@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-
-	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 // cffDefaultUnitsPerEm is the units-per-em assumed when a bare CFF has no
@@ -396,57 +394,11 @@ func cffCIDCmap(data []byte, numGlyphs uint16) []byte {
 			continue
 		}
 		pairs = append(pairs, cmapPair{code: uint32(packedGlyphBase) + uint32(cid), glyph: uint16(gid)})
-		if r, ok := adobeGB1CIDToUnicode(cid); ok {
+		if r, ok := AdobeGB1CIDToUnicode(cid); ok {
 			pairs = append(pairs, cmapPair{code: uint32(r), glyph: uint16(gid)})
 		}
 	}
 	return cmapFromPairs(pairs)
-}
-
-// adobeGB1CIDToUnicode covers the Adobe-GB1 CID range used by the embedded
-// Chinese CFF fonts. The CID-to-GBK conversion follows the Adobe-GB1 mapping
-// used by OFDGo without adding a text-encoding dependency to fontfix.
-func adobeGB1CIDToUnicode(cid int) (rune, bool) {
-	switch cid {
-	case 1036:
-		return '\u4fdd', true
-	case 2584:
-		return '\u6599', true
-	case 2785:
-		return '\u5bc6', true
-	case 4647:
-		return '\u8d44', true
-	case 329:
-		return '\u201c', true
-	case 330:
-		return '\u201d', true
-	case 821:
-		return '\u3001', true
-	case 822:
-		return '\u3002', true
-	case 829:
-		return '\u300a', true
-	case 830:
-		return '\u300b', true
-	}
-	n := cid + 471
-	if n <= 0 {
-		return 0, false
-	}
-	row := (n-1)/94 + 1
-	cell := (n-1)%94 + 1
-	if row < 16 || row > 87 || cell < 1 || cell > 94 {
-		return 0, false
-	}
-	return decodeGBKPair(byte(row+0xa0), byte(cell+0xa0))
-}
-
-func decodeGBKPair(high, low byte) (rune, bool) {
-	decoded, err := simplifiedchinese.GBK.NewDecoder().Bytes([]byte{high, low})
-	if err != nil || len([]rune(string(decoded))) != 1 {
-		return 0, false
-	}
-	return []rune(string(decoded))[0], true
 }
 
 func cffCharset(data []byte, offset, numGlyphs int) []int {
