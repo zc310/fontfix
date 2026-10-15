@@ -46,14 +46,15 @@ func RepairWithGlyphs(data []byte, mappings []GlyphMapping) ([]byte, error) {
 
 	// Caller mappings are authoritative: remove other Unicode codes for the same glyph,
 	// such as standard Adobe-GB1 CID mappings, or GlyphToUnicode may return stale codes.
-	// Private-use entries are keyed by GID; caller GIDs take precedence over CID aliases.
+	// Private-use entries are keyed by GID. For a code the caller maps explicitly the
+	// caller's glyph wins; otherwise the GID-keyed alias overrides the CID alias.
 	overrideGlyph, overridePacked := glyphCMapOverrides(overrides)
 	merged := make([]cmapPair, 0, len(pairs)+len(overrides))
 	seen := make(map[uint32]bool, len(pairs)+2*len(overrides))
 	for _, pair := range pairs {
-		if glyph, ok := overridePacked[pair.code]; ok {
+		if glyph, ok := overrides[pair.code]; ok {
 			pair.glyph = glyph
-		} else if glyph, ok := overrides[pair.code]; ok {
+		} else if glyph, ok := overridePacked[pair.code]; ok {
 			pair.glyph = glyph
 		} else if pair.code < uint32(packedGlyphBase) {
 			if code, ok := overrideGlyph[pair.glyph]; ok && code != pair.code {

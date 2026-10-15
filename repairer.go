@@ -148,8 +148,12 @@ func (r *Repairer) WithGlyphs(mappings []GlyphMapping) ([]byte, error) {
 			i++
 			j++
 		}
-		if glyph, ok := overridePacked[next.code]; ok {
-			next.glyph = glyph
+		if fromBase {
+			// 私有区别名只用于改写基础 cmap：调用方显式给出的映射（additions）
+			// 已按自己的码位→字形给出结果，不得被 GID 别名覆盖。
+			if glyph, ok := overridePacked[next.code]; ok {
+				next.glyph = glyph
+			}
 		}
 		if fromBase && next.code < uint32(packedGlyphBase) {
 			if code, ok := overrideGlyph[next.glyph]; ok && code != next.code {

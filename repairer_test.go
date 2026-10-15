@@ -261,6 +261,49 @@ func TestRepairerIncrementalMatchesFullRepair(t *testing.T) {
 	}
 }
 
+// TestRepairerReservedRangeMatchesFullPath 覆盖调用方把码位落在库内部私有区
+// （0xF0000+ 字形引用命名空间）时的两条路径一致性：调用方显式给出的映射必须
+// 优先于按 GID 生成的私有区别名，Repairer 与 RepairWithGlyphs 不得给出不同 cmap。
+func TestRepairerReservedRangeMatchesFullPath(t *testing.T) {
+	const numGlyphs = 300
+	head := make([]byte, 54)
+	binary.BigEndian.PutUint16(head[18:20], 1000)
+	maxp := make([]byte, 6)
+	binary.BigEndian.PutUint16(maxp[4:6], numGlyphs)
+	// 无 OS/2，Repair 会重建并补入私有区字形引用 cmap，使基础 cmap 覆盖 0xF0000+。
+	data := buildSFNT([]sfntTestTable{
+		{tag: "head", data: head},
+		{tag: "maxp", data: maxp},
+		{tag: "glyf", data: make([]byte, 4096)},
+	})
+	r := NewRepairer(data)
+	rnd := rand.New(rand.NewSource(42))
+	for iter := 0; iter < 500; iter++ {
+		n := 1 + rnd.Intn(80)
+		mappings := make([]GlyphMapping, 0, n)
+		for j := 0; j < n; j++ {
+			var rn rune
+			switch rnd.Intn(4) {
+			case 0:
+				rn = rune(0x4E00 + rnd.Intn(2000))
+			case 1, 2:
+				rn = rune(uint32(packedGlyphBase) + uint32(rnd.Intn(numGlyphs+20)))
+			default:
+				rn = rune(0x20 + rnd.Intn(0x2000))
+			}
+			mappings = append(mappings, GlyphMapping{Rune: rn, Glyph: uint16(rnd.Intn(numGlyphs + 1))})
+		}
+		want, wantErr := RepairWithGlyphs(data, mappings)
+		got, gotErr := r.WithGlyphs(mappings)
+		if (wantErr == nil) != (gotErr == nil) {
+			t.Fatalf("用例 %d: 错误不一致 want=%v got=%v", iter, wantErr, gotErr)
+		}
+		if !bytes.Equal(want, got) {
+			t.Fatalf("用例 %d: 输出不一致 want=%d got=%d", iter, len(want), len(got))
+		}
+	}
+}
+
 // TestRepairerOutputChecksumsValid 校验增量输出的每张表校验和与整字体校验和都
 // 与规范一致：缓存校验和不得让 head 的 checksumAdjustment 计算失配。
 func TestRepairerOutputChecksumsValid(t *testing.T) {
