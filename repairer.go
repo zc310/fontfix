@@ -1,6 +1,10 @@
 package fontfix
 
-import "slices"
+import (
+	"encoding/binary"
+	"slices"
+	"strings"
+)
 
 // Repairer 复用一次基础修复的结果，反复按不同的字形映射修补 cmap。
 //
@@ -16,7 +20,10 @@ type Repairer struct {
 	// base 是 Repair 之后的基础字体，nil 表示尚不可修补。
 	base []byte
 	// pairs 是 base 的 cmap 映射，按 code 升序且 code 唯一。
-	pairs  []cmapPair
+	pairs []cmapPair
+	// tables 是 base 的表目录，已带各表预计算的校验和。映射增长时只有 cmap
+	// 变化，其余大表（glyf/CFF 等）的校验和与内容都不必重算，直接复用。
+	tables []sfntTable
 	usable bool
 }
 
@@ -36,8 +43,51 @@ func NewRepairer(data []byte) *Repairer {
 	slices.SortFunc(pairs, compareCMapPair)
 	r.base = base
 	r.pairs = pairs
+	r.tables = cachedTables(base)
 	r.usable = true
 	return r
+}
+
+// cachedTables 返回 base 的表目录，并为每张表预计算校验和。head 表按
+// checksumAdjustment 置零后的值（即 rebuildSFNT 会写入目录的值）缓存：校验和
+// 按 4 字节字可加，减去 adjustment 所占的那个字即可。非 head 表仍可能因校验和
+// 恰为 0 而走现算路径，只是浪费一次扫描，不影响正确性。
+func cachedTables(base []byte) []sfntTable {
+	tables, ok := readSFNTTables(base)
+	if !ok {
+		return nil
+	}
+	for i := range tables {
+		sum := tableChecksum(tables[i].data)
+		if tables[i].tag == "head" && len(tables[i].data) >= 12 {
+			sum -= binary.BigEndian.Uint32(tables[i].data[8:12])
+		}
+		tables[i].checksum = sum
+	}
+	return tables
+}
+
+// replaceCmap 用 tables 中缓存的内容重建字体，只替换 cmap 表。
+func (r *Repairer) replaceCmap(cmap []byte) ([]byte, error) {
+	if r.tables == nil {
+		return replaceTable(r.base, "cmap", cmap)
+	}
+	tables := make([]sfntTable, len(r.tables))
+	copy(tables, r.tables)
+	replaced := false
+	for i := range tables {
+		if tables[i].tag == "cmap" {
+			tables[i].data = cmap
+			tables[i].checksum = 0
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		tables = append(tables, sfntTable{tag: "cmap", data: cmap})
+		slices.SortFunc(tables, func(a, b sfntTable) int { return strings.Compare(a.tag, b.tag) })
+	}
+	return rebuildSFNT(r.base[:4], tables), nil
 }
 
 // WithGlyphs 返回按 mappings 修补 cmap 后的字体副本，语义与
@@ -112,19 +162,26 @@ func (r *Repairer) WithGlyphs(mappings []GlyphMapping) ([]byte, error) {
 		seen[next.code] = true
 		merged = append(merged, next)
 	}
+	extras := make([]cmapPair, 0, len(overridePacked))
 	for code, glyph := range overridePacked {
 		if seen[code] {
 			continue
 		}
 		seen[code] = true
-		merged = append(merged, cmapPair{code: code, glyph: glyph})
+		extras = append(extras, cmapPair{code: code, glyph: glyph})
+	}
+	if len(extras) > 0 {
+		// merged 已按 code 升序，排序尾部新增项后归并，保持 merged 有序，
+		// 让 format12Subtable 跳过对整段的重复排序。
+		slices.SortFunc(extras, compareCMapPair)
+		merged = mergeSortedPairs(merged, extras)
 	}
 
 	cmap := cmapFromPairs(merged)
 	if cmap == nil {
 		return append([]byte(nil), r.base...), nil
 	}
-	result, err := replaceTable(r.base, "cmap", cmap)
+	result, err := r.replaceCmap(cmap)
 	if err != nil {
 		return append([]byte(nil), r.base...), nil
 	}
@@ -140,6 +197,24 @@ func compareCMapPair(a, b cmapPair) int {
 		return 1
 	}
 	return int(a.glyph) - int(b.glyph)
+}
+
+// mergeSortedPairs 归并两个按 code 升序、code 唯一的 cmapPair 序列。
+func mergeSortedPairs(a, b []cmapPair) []cmapPair {
+	out := make([]cmapPair, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].code < b[j].code {
+			out = append(out, a[i])
+			i++
+		} else {
+			out = append(out, b[j])
+			j++
+		}
+	}
+	out = append(out, a[i:]...)
+	out = append(out, b[j:]...)
+	return out
 }
 
 // isSFNT 判断字节是否以 SFNT 版本号开头。

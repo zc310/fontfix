@@ -3,6 +3,7 @@ package fontfix
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
 	"io"
 	"math/rand"
 	"testing"
@@ -204,5 +205,90 @@ func TestRepairDoesNotMutateInput(t *testing.T) {
 	}
 	if !bytes.Equal(data, original) {
 		t.Fatal("RepairWithGlyphs 改写了输入缓冲")
+	}
+}
+
+// syntheticRepairerFont 构建一个自带较大 glyf 表的字体，使表校验和在增量路径中
+// 占主导。它不依赖外部样本，可在 CI 中稳定运行。
+func syntheticRepairerFont() []byte {
+	glyf := make([]byte, 256<<10)
+	for i := range glyf {
+		glyf[i] = byte(i*7 + 3)
+	}
+	head := make([]byte, 54)
+	binary.BigEndian.PutUint16(head[18:20], 1000)
+	maxp := make([]byte, 6)
+	binary.BigEndian.PutUint16(maxp[4:6], 512)
+	return buildSFNT([]sfntTestTable{
+		{tag: "OS/2", data: make([]byte, 96)},
+		{tag: "glyf", data: glyf},
+		{tag: "head", data: head},
+		{tag: "maxp", data: maxp},
+		{tag: "name", data: minimalNameTable()},
+		{tag: "post", data: minimalPostTable()},
+	})
+}
+
+// TestRepairerIncrementalMatchesFullRepair 用一个自带的大表字体校验增量路径与
+// 全量路径逐字节一致：缓存各表校验和只能加速，不得改变任何输出字节。
+//
+// 映射只用普通文本码位（CJK、拉丁）：0xF0000+ 私有区是本库存放字形引用的内部
+// 命名空间，不属于调用方文本，不在此覆盖。
+func TestRepairerIncrementalMatchesFullRepair(t *testing.T) {
+	data := syntheticRepairerFont()
+	r := NewRepairer(data)
+	rnd := rand.New(rand.NewSource(1))
+	for iter := 0; iter < 100; iter++ {
+		n := 1 + rnd.Intn(200)
+		mappings := make([]GlyphMapping, 0, n)
+		for j := 0; j < n; j++ {
+			var rn rune
+			if rnd.Intn(2) == 0 {
+				rn = rune(0x4E00 + rnd.Intn(1000))
+			} else {
+				rn = rune(0x20 + rnd.Intn(0x1000))
+			}
+			mappings = append(mappings, GlyphMapping{Rune: rn, Glyph: uint16(1 + rnd.Intn(300))})
+		}
+		want, wantErr := RepairWithGlyphs(data, mappings)
+		got, gotErr := r.WithGlyphs(mappings)
+		if (wantErr == nil) != (gotErr == nil) {
+			t.Fatalf("用例 %d: 错误不一致 want=%v got=%v", iter, wantErr, gotErr)
+		}
+		if !bytes.Equal(want, got) {
+			t.Fatalf("用例 %d: 增量输出与全量不一致 want=%d got=%d", iter, len(want), len(got))
+		}
+	}
+}
+
+// TestRepairerOutputChecksumsValid 校验增量输出的每张表校验和与整字体校验和都
+// 与规范一致：缓存校验和不得让 head 的 checksumAdjustment 计算失配。
+func TestRepairerOutputChecksumsValid(t *testing.T) {
+	data := syntheticRepairerFont()
+	out, err := NewRepairer(data).WithGlyphs([]GlyphMapping{{Rune: 'A', Glyph: 2}, {Rune: 'B', Glyph: 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	numTables := int(binary.BigEndian.Uint16(out[4:6]))
+	for i := 0; i < numTables; i++ {
+		record := 12 + i*16
+		tag := string(out[record : record+4])
+		offset := int(binary.BigEndian.Uint32(out[record+8 : record+12]))
+		length := int(binary.BigEndian.Uint32(out[record+12 : record+16]))
+		body := out[offset : offset+length]
+		sum := tableChecksum(body)
+		if tag == "head" && length >= 12 {
+			sum -= binary.BigEndian.Uint32(body[8:12])
+		}
+		if stored := binary.BigEndian.Uint32(out[record+4 : record+8]); sum != stored {
+			t.Fatalf("表 %q 校验和 = %#x, 目录记录 = %#x", tag, sum, stored)
+		}
+	}
+	var whole uint32
+	for offset := 0; offset+4 <= len(out); offset += 4 {
+		whole += binary.BigEndian.Uint32(out[offset : offset+4])
+	}
+	if whole != 0xB1B0AFBA {
+		t.Fatalf("整字体校验和 = %#x, want 0xB1B0AFBA", whole)
 	}
 }

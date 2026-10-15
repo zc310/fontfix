@@ -151,6 +151,28 @@ func TestRebuildSFNTMatchesReference(t *testing.T) {
 	}
 }
 
+// rebuildSFNT 采用预计算校验和时，输出必须与现算逐字节一致。缓存只能省去对表
+// 内容的重复扫描，不得改变结果；head 按 checksumAdjustment 置零后的值缓存。
+func TestRebuildSFNTPrecomputedChecksumsMatch(t *testing.T) {
+	for _, tc := range referenceCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			want := rebuildSFNT(append([]byte(nil), tc.scaler...), cloneTables(tc.tables))
+			cached := cloneTables(tc.tables)
+			for i := range cached {
+				sum := tableChecksum(cached[i].data)
+				if cached[i].tag == "head" && len(cached[i].data) >= 12 {
+					sum -= binary.BigEndian.Uint32(cached[i].data[8:12])
+				}
+				cached[i].checksum = sum
+			}
+			got := rebuildSFNT(append([]byte(nil), tc.scaler...), cached)
+			if !bytes.Equal(want, got) {
+				t.Fatalf("预置校验和的输出与现算不一致")
+			}
+		})
+	}
+}
+
 // rebuildSFNT 不得改写调用方传入的表内容（优化后表内容可能是来源缓冲的子切片）。
 func TestRebuildSFNTDoesNotMutateInputTables(t *testing.T) {
 	tables := []sfntTable{

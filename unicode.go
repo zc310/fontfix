@@ -237,36 +237,46 @@ func tableData(data []byte, tag string) ([]byte, bool) {
 	return nil, false
 }
 
-// replaceTable 返回把指定表替换为新数据的字体副本。
-func replaceTable(data []byte, tag string, replacement []byte) ([]byte, error) {
+// readSFNTTables 返回字体目录中的表，data 为来源缓冲的子切片，可按原样交给
+// rebuildSFNT（它不会改写表内容）。目录越界时返回 false。
+func readSFNTTables(data []byte) ([]sfntTable, bool) {
 	if len(data) < sfntHeaderSize {
-		return nil, errTruncated
+		return nil, false
 	}
 	numTables := int(binary.BigEndian.Uint16(data[4:6]))
-	directoryEnd := sfntHeaderSize + numTables*sfntTableEntrySize
-	if directoryEnd > len(data) {
-		return nil, errTruncated
+	if sfntHeaderSize+numTables*sfntTableEntrySize > len(data) {
+		return nil, false
 	}
-	tables := make([]sfntTable, 0, numTables+1)
-	replaced := false
+	tables := make([]sfntTable, 0, numTables)
 	for i := 0; i < numTables; i++ {
 		record := sfntHeaderSize + i*sfntTableEntrySize
-		current := string(data[record : record+4])
+		tag := string(data[record : record+4])
 		offset := int(binary.BigEndian.Uint32(data[record+8 : record+12]))
 		length := int(binary.BigEndian.Uint32(data[record+12 : record+16]))
 		if offset > len(data) || length > len(data)-offset {
-			return nil, errTruncated
+			return nil, false
 		}
-		if current == tag {
-			tables = append(tables, sfntTable{tag: current, data: append([]byte(nil), replacement...)})
+		tables = append(tables, sfntTable{tag: tag, data: data[offset : offset+length]})
+	}
+	return tables, true
+}
+
+// replaceTable 返回把指定表替换为新数据的字体副本。
+func replaceTable(data []byte, tag string, replacement []byte) ([]byte, error) {
+	tables, ok := readSFNTTables(data)
+	if !ok {
+		return nil, errTruncated
+	}
+	replaced := false
+	for i := range tables {
+		if tables[i].tag == tag {
+			// rebuildSFNT 不改写表内容，replacement 可直接引用，无需复制。
+			tables[i].data = replacement
 			replaced = true
-			continue
 		}
-		// 未替换的表取引用即可：rebuildSFNT 不会改写表内容。
-		tables = append(tables, sfntTable{tag: current, data: data[offset : offset+length]})
 	}
 	if !replaced {
-		tables = append(tables, sfntTable{tag: tag, data: append([]byte(nil), replacement...)})
+		tables = append(tables, sfntTable{tag: tag, data: replacement})
 	}
 	slices.SortFunc(tables, func(a, b sfntTable) int { return strings.Compare(a.tag, b.tag) })
 	return rebuildSFNT(data[:4], tables), nil

@@ -86,16 +86,39 @@ func addPackedGlyphMap(data []byte, numGlyphs uint16) []byte {
 	for _, pair := range cmapUnicodePairs(data) {
 		byCode[pair.code] = pair.glyph
 	}
-	for glyphID := 0; glyphID < int(numGlyphs); glyphID++ {
-		code := uint32(packedGlyphBase) + uint32(glyphID)
-		if _, ok := byCode[code]; !ok {
-			byCode[code] = uint16(glyphID)
+	// 原有码位（小于私有区起点）数量固定，排序它即可；私有区段 0xF0000+gid
+	// 按 gid 递增天然有序，无需并入整体排序（子集字体里该段可达上万条）。
+	low := make([]cmapPair, 0, len(byCode))
+	for code, glyph := range byCode {
+		if code < uint32(packedGlyphBase) {
+			low = append(low, cmapPair{code: code, glyph: glyph})
 		}
 	}
-	pairs := make([]cmapPair, 0, len(byCode))
-	for code, glyphID := range byCode {
-		pairs = append(pairs, cmapPair{code: code, glyph: glyphID})
+	slices.SortFunc(low, compareCMapPair)
+
+	high := uint32(packedGlyphBase) + uint32(numGlyphs) - 1
+	packedRange := make([]cmapPair, 0, int(numGlyphs))
+	for glyphID := 0; glyphID < int(numGlyphs); glyphID++ {
+		code := uint32(packedGlyphBase) + uint32(glyphID)
+		glyph := uint16(glyphID)
+		if existing, ok := byCode[code]; ok {
+			glyph = existing // 字体已有的私有区映射优先
+		}
+		packedRange = append(packedRange, cmapPair{code: code, glyph: glyph})
 	}
+	// 私有区中超出 gid 覆盖范围、但字体 cmap 已有的码位（罕见）排序后接在后面。
+	extras := make([]cmapPair, 0)
+	for code, glyph := range byCode {
+		if code > high {
+			extras = append(extras, cmapPair{code: code, glyph: glyph})
+		}
+	}
+	if len(extras) > 0 {
+		slices.SortFunc(extras, compareCMapPair)
+		packedRange = append(packedRange, extras...)
+	}
+	// low 的码位都小于私有区起点、packedRange 都大于等于它，直接拼接即有序。
+	pairs := append(low, packedRange...)
 	packed := format12Subtable(pairs)
 
 	result := bytes.NewBuffer(make([]byte, 0, len(data)+len(packed)+8))
@@ -185,8 +208,8 @@ func format12Subtable(pairs []cmapPair) []byte {
 		return nil
 	}
 	// 以 code 为首键、glyph 为次键构成全序：slices.SortFunc 不稳定，补上次键
-	// 才能让相同 code 的输入得到确定输出。
-	slices.SortFunc(pairs, func(a, b cmapPair) int {
+	// 才能让相同 code 的输入得到确定输出。输入已有序（增量修补路径）时跳过排序。
+	cmp := func(a, b cmapPair) int {
 		if a.code != b.code {
 			if a.code < b.code {
 				return -1
@@ -194,7 +217,10 @@ func format12Subtable(pairs []cmapPair) []byte {
 			return 1
 		}
 		return int(a.glyph) - int(b.glyph)
-	})
+	}
+	if !slices.IsSortedFunc(pairs, cmp) {
+		slices.SortFunc(pairs, cmp)
+	}
 	type group struct {
 		startCode uint32
 		endCode   uint32

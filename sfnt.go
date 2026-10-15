@@ -13,12 +13,16 @@ const (
 type sfntTable struct {
 	tag  string
 	data []byte
+	// checksum 是该表预计算的校验和（head 表按 checksumAdjustment 置零后的值）。
+	// 非零时 rebuildSFNT 直接采用，跳过对表内容的重复扫描；0 表示需要现算。
+	checksum uint32
 }
 
 type sfntRecord struct {
-	tag    string
-	data   []byte
-	offset int
+	tag      string
+	data     []byte
+	offset   int
+	checksum uint32
 }
 
 func minimalOS2Table(unitsPerEm uint16) []byte {
@@ -86,7 +90,7 @@ func rebuildSFNT(scaler []byte, tables []sfntTable) []byte {
 			offset = records[len(records)-1].offset + paddedLength(len(records[len(records)-1].data))
 		}
 		copy(result[offset:], table.data)
-		records = append(records, sfntRecord{tag: table.tag, data: table.data, offset: offset})
+		records = append(records, sfntRecord{tag: table.tag, data: table.data, offset: offset, checksum: table.checksum})
 	}
 
 	// head 的 checksumAdjustment 必须以 0 参与表校验和与整字体校验和的计算。
@@ -99,15 +103,22 @@ func rebuildSFNT(scaler []byte, tables []sfntTable) []byte {
 	}
 
 	dir := sfntHeaderSize
+	var tableSum uint32
 	for _, record := range records {
 		copy(result[dir:], record.tag)
-		putUint32(result[dir+4:], tableChecksum(result[record.offset:record.offset+len(record.data)]))
+		checksum := record.checksum
+		if checksum == 0 {
+			checksum = tableChecksum(result[record.offset : record.offset+len(record.data)])
+		}
+		tableSum += checksum
+		putUint32(result[dir+4:], checksum)
 		putUint32(result[dir+8:], uint32(record.offset))
 		putUint32(result[dir+12:], uint32(len(record.data)))
 		dir += sfntTableEntrySize
 	}
 
-	fixHeadChecksumAdjustment(result, records)
+	// 整字体校验和 = 表目录区校验和 + 各表校验和之和，避免对整个字体再扫一遍。
+	fixHeadChecksumAdjustment(result, records, tableSum)
 	return result
 }
 
@@ -151,14 +162,16 @@ func tableChecksum(data []byte) uint32 {
 }
 
 // fixHeadChecksumAdjustment 在结果缓冲上回填 head 的 checksumAdjustment。
-// 调用前 head 的该字段已被清零，整字体校验和因此与规范一致。
-func fixHeadChecksumAdjustment(data []byte, records []sfntRecord) {
+// 调用前 head 的该字段已被清零，整字体校验和因此与规范一致。tableSum 是各表
+// 校验和之和；整字体校验和 = 表目录区校验和 + tableSum，无需再扫全字体。
+func fixHeadChecksumAdjustment(data []byte, records []sfntRecord, tableSum uint32) {
+	directoryEnd := sfntHeaderSize + len(records)*sfntTableEntrySize
 	for _, record := range records {
 		if record.tag != "head" || len(record.data) < 12 || record.offset+12 > len(data) {
 			continue
 		}
 		putUint32(data[record.offset+8:], 0)
-		checksum := tableChecksum(data)
+		checksum := tableChecksum(data[:directoryEnd]) + tableSum
 		putUint32(data[record.offset+8:], 0xB1B0AFBA-checksum)
 		return
 	}
