@@ -76,12 +76,16 @@ func Repair(data []byte) ([]byte, error) {
 	}
 
 	needsGlyphMap := cmapIndex >= 0 && maxGlyphs > 0 && !hasPackedGlyphMap(tables[cmapIndex].data)
+	addedGlyphCmap := false
 	if cmapIndex < 0 && maxGlyphs > 0 {
 		tables = append(tables, sfntTable{tag: "cmap", data: packedGlyphCmap(maxGlyphs)})
 		cmapIndex = len(tables) - 1
 		needsGlyphMap = false
+		addedGlyphCmap = true
 	}
-	if hasOS2 && hasName && hasPost && !needsGlyphMap {
+	// 只有 tables 与输入一致时才可原样返回；刚补入 cmap 时必须重建，否则补的表
+	// 会被丢弃。
+	if hasOS2 && hasName && hasPost && !needsGlyphMap && !addedGlyphCmap {
 		return data, nil
 	}
 	if !hasOS2 {

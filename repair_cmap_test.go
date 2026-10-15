@@ -1,9 +1,41 @@
 package fontfix
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 )
+
+// TestRepairAddsGlyphCmapToFontWithoutCmap 验证缺少 cmap、但已有 OS/2/name/post 的
+// 字体也会补入私有区字形 cmap；此前这部分会在提前返回时丢弃刚补的 cmap。
+func TestRepairAddsGlyphCmapToFontWithoutCmap(t *testing.T) {
+	head := make([]byte, 54)
+	binary.BigEndian.PutUint16(head[18:20], 1000)
+	maxp := make([]byte, 6)
+	binary.BigEndian.PutUint16(maxp[4:6], 8)
+	font := buildSFNT([]sfntTestTable{
+		{tag: "OS/2", data: make([]byte, 96)},
+		{tag: "head", data: head},
+		{tag: "maxp", data: maxp},
+		{tag: "name", data: minimalNameTable()},
+		{tag: "post", data: minimalPostTable()},
+	})
+	fixed, err := Repair(font)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmap, ok := findTable(fixed, "cmap")
+	if !ok || !hasPackedGlyphMap(cmap) {
+		t.Fatal("packed glyph cmap was not added")
+	}
+	second, err := Repair(fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(second, fixed) {
+		t.Fatal("repairing an already repaired font was not idempotent")
+	}
+}
 
 func TestRepairAddsPackedGlyphCmap(t *testing.T) {
 	fixed, err := Repair(testFontWithoutPackedGlyphCmap())
