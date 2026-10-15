@@ -43,36 +43,18 @@ func RepairWithGlyphs(data []byte, mappings []GlyphMapping) ([]byte, error) {
 	}
 
 	pairs := parseCMapPairs(fixed)
-	// Repair 会为每个字形补齐私有区映射。CID CFF 的私有区按 CID 编号，而调用方
-	// 从 OFD CGTransform.Glyphs 拿到的是 CID，不是字形索引；这里先按私有区映射
-	// 把 CID 翻译成真正的字形 ID，TrueType 字体的调用值本就是字形 ID，翻译后不变。
-	glyphByPacked := make(map[uint32]uint16, len(pairs))
-	for _, pair := range pairs {
-		if pair.code >= uint32(packedGlyphBase) {
-			glyphByPacked[pair.code] = pair.glyph
-		}
-	}
-	resolve := func(value uint16) uint16 {
-		if glyph, ok := glyphByPacked[uint32(packedGlyphBase)+uint32(value)]; ok {
-			return glyph
-		}
-		return value
-	}
 
-	// 调用方映射是文档的权威映射：同一字形若还存在其它 Unicode 码位映射
-	// （例如 CID CFF 由 cffCIDCmap 补入的 Adobe-GB1 标准 CID→Unicode 映射），
-	// 必须移除。否则字体 cmap 反查（GlyphToUnicode）会按码位大小返回陈旧码位，
-	// 使 PDF ToUnicode 把文字提取成错误字符。私有区映射（packedGlyphBase+CID）
-	// 用于按字形 ID 渲染，予以保留。
-	overrideGlyph := make(map[uint16]uint32, len(overrides))
-	for code, glyph := range overrides {
-		overrideGlyph[resolve(glyph)] = code
-	}
+	// Caller mappings are authoritative: remove other Unicode codes for the same glyph,
+	// such as standard Adobe-GB1 CID mappings, or GlyphToUnicode may return stale codes.
+	// Private-use entries are keyed by GID; caller GIDs take precedence over CID aliases.
+	overrideGlyph, overridePacked := glyphCMapOverrides(overrides)
 	merged := make([]cmapPair, 0, len(pairs)+len(overrides))
-	seen := make(map[uint32]bool, len(pairs)+len(overrides))
+	seen := make(map[uint32]bool, len(pairs)+2*len(overrides))
 	for _, pair := range pairs {
-		if glyph, ok := overrides[pair.code]; ok {
-			pair.glyph = resolve(glyph)
+		if glyph, ok := overridePacked[pair.code]; ok {
+			pair.glyph = glyph
+		} else if glyph, ok := overrides[pair.code]; ok {
+			pair.glyph = glyph
 		} else if pair.code < uint32(packedGlyphBase) {
 			if code, ok := overrideGlyph[pair.glyph]; ok && code != pair.code {
 				continue
@@ -89,7 +71,14 @@ func RepairWithGlyphs(data []byte, mappings []GlyphMapping) ([]byte, error) {
 			continue
 		}
 		seen[code] = true
-		merged = append(merged, cmapPair{code: code, glyph: resolve(glyph)})
+		merged = append(merged, cmapPair{code: code, glyph: glyph})
+	}
+	for code, glyph := range overridePacked {
+		if seen[code] {
+			continue
+		}
+		seen[code] = true
+		merged = append(merged, cmapPair{code: code, glyph: glyph})
 	}
 
 	cmap := cmapFromPairs(merged)
@@ -101,6 +90,16 @@ func RepairWithGlyphs(data []byte, mappings []GlyphMapping) ([]byte, error) {
 		return fixed, nil
 	}
 	return result, nil
+}
+
+func glyphCMapOverrides(overrides map[uint32]uint16) (map[uint16]uint32, map[uint32]uint16) {
+	byGlyph := make(map[uint16]uint32, len(overrides))
+	byPackedRune := make(map[uint32]uint16, len(overrides))
+	for code, glyph := range overrides {
+		byGlyph[glyph] = code
+		byPackedRune[uint32(packedGlyphBase)+uint32(glyph)] = glyph
+	}
+	return byGlyph, byPackedRune
 }
 
 // parseCMapPairs 解析字体 cmap 表中的 code→glyph 映射，支持常见的 format 4

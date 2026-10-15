@@ -108,10 +108,9 @@ func packedGlyphRange(data []byte, field int) uint32 {
 }
 
 func TestRepairWithGlyphsReplacesStaleGlyphMapping(t *testing.T) {
-	// 字体可能已有「陈旧」的 Unicode→字形映射（例如 CID CFF 由 cffCIDCmap 补入
-	// 的 Adobe-GB1 标准 CID→Unicode 映射）。调用方用文档权威映射覆盖同一字形
-	// 时，必须移除旧码位，否则字体 cmap 反查（GlyphToUnicode）会按码位大小返回
-	// 陈旧码位，使 PDF ToUnicode 把文字提取成错误字符。
+	// A font may contain stale Unicode-to-glyph mappings, such as standard Adobe-GB1
+	// CID mappings. Replacing them with document mappings must remove the old codes;
+	// otherwise GlyphToUnicode may return a stale code and break PDF ToUnicode text.
 	base := testFontWithoutPackedGlyphCmap()
 	base, err := replaceTable(base, "cmap", cmapFromPairs([]cmapPair{{code: 'A', glyph: 2}}))
 	if err != nil {

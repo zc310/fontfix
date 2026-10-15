@@ -25,6 +25,51 @@ func TestRepairWithGlyphsAddsUnicodeMapping(t *testing.T) {
 	}
 }
 
+func TestRepairWithGlyphsUsesGIDWhenPackedMapIsNonIdentity(t *testing.T) {
+	base := testFontWithoutPackedGlyphCmap()
+	base, err := replaceTable(base, "cmap", cmapFromPairs([]cmapPair{
+		{code: uint32(packedGlyphBase) + 2, glyph: 1},
+		{code: uint32(packedGlyphBase) + 19, glyph: 2},
+		{code: 'A', glyph: 2},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappings := []GlyphMapping{{Rune: '2', Glyph: 2}}
+
+	check := func(t *testing.T, data []byte) {
+		t.Helper()
+		glyphs := make(map[uint32]uint16)
+		for _, pair := range parseCMapPairs(data) {
+			glyphs[pair.code] = pair.glyph
+		}
+		if glyphs['2'] != 2 {
+			t.Fatalf("cmap['2'] = %d, want GID 2", glyphs['2'])
+		}
+		if glyphs[uint32(packedGlyphBase)+19] != 2 {
+			t.Fatalf("CID 19 private mapping = %d, want GID 2", glyphs[uint32(packedGlyphBase)+19])
+		}
+		if glyphs[uint32(packedGlyphBase)+2] != 2 {
+			t.Fatalf("GID 2 private mapping = %d, want GID 2", glyphs[uint32(packedGlyphBase)+2])
+		}
+		if _, exists := glyphs['A']; exists {
+			t.Fatal("stale Unicode mapping for GID 2 was not removed")
+		}
+	}
+
+	fixed, err := RepairWithGlyphs(base, mappings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, fixed)
+
+	fixed, err = NewRepairer(base).WithGlyphs(mappings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(t, fixed)
+}
+
 func TestRepairWithGlyphsPreservesExistingMappings(t *testing.T) {
 	// 字体已有 cmap 时，未冲突的既有映射必须保留。
 	base := testFontWithoutPackedGlyphCmap()
