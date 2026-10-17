@@ -79,7 +79,9 @@ func TestGB1UnassignedAndOutOfRange(t *testing.T) {
 func TestGB1ConcurrentLookups(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
-		wg.Go(func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			for j := 0; j < 100; j++ {
 				if text, ok := GB1Text(22031); !ok || text != "郎\uFE00" {
 					t.Errorf("concurrent text lookup: %q, %v", text, ok)
@@ -88,7 +90,7 @@ func TestGB1ConcurrentLookups(t *testing.T) {
 					t.Errorf("concurrent glyph lookup: %U, %v", glyph, ok)
 				}
 			}
-		})
+		}()
 	}
 	wg.Wait()
 }

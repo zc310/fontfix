@@ -13,7 +13,15 @@ import (
 
 // Both lookups share this lazily inflated BMP table. Supplementary characters
 // and the differences between the two upstream mappings are stored separately.
-var gb1Table = sync.OnceValue(func() []uint16 {
+var gb1Once sync.Once
+var gb1BMP []uint16
+
+func gb1Table() []uint16 {
+	gb1Once.Do(func() { gb1BMP = loadGB1Table() })
+	return gb1BMP
+}
+
+func loadGB1Table() []uint16 {
 	packed, err := base64.StdEncoding.DecodeString(adobeGB1Packed)
 	if err != nil {
 		return nil
@@ -32,7 +40,7 @@ var gb1Table = sync.OnceValue(func() []uint16 {
 		table[cid] = binary.BigEndian.Uint16(raw[cid*2:])
 	}
 	return table
-})
+}
 
 // GB1GlyphUnicode returns the single Unicode code point used to repair an
 // Adobe-GB1 font's cmap. It preserves the vertical, private-use and compatibility

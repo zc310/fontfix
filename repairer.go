@@ -2,8 +2,7 @@ package fontfix
 
 import (
 	"encoding/binary"
-	"slices"
-	"strings"
+	"sort"
 )
 
 // Repairer 复用一次基础修复的结果，反复按不同的字形映射修补 cmap。
@@ -40,7 +39,7 @@ func NewRepairer(data []byte) *Repairer {
 		return r
 	}
 	pairs := parseCMapPairs(base)
-	slices.SortFunc(pairs, compareCMapPair)
+	sort.Sort(cmapPairs(pairs))
 	r.base = base
 	r.pairs = pairs
 	r.tables = cachedTables(base)
@@ -85,7 +84,7 @@ func (r *Repairer) replaceCmap(cmap []byte) ([]byte, error) {
 	}
 	if !replaced {
 		tables = append(tables, sfntTable{tag: "cmap", data: cmap})
-		slices.SortFunc(tables, func(a, b sfntTable) int { return strings.Compare(a.tag, b.tag) })
+		sort.Sort(sfntTables(tables))
 	}
 	return rebuildSFNT(r.base[:4], tables), nil
 }
@@ -125,7 +124,7 @@ func (r *Repairer) WithGlyphs(mappings []GlyphMapping) ([]byte, error) {
 	for code, glyph := range overrides {
 		additions = append(additions, cmapPair{code: code, glyph: glyph})
 	}
-	slices.SortFunc(additions, compareCMapPair)
+	sort.Sort(cmapPairs(additions))
 
 	merged := make([]cmapPair, 0, len(r.pairs)+len(additions))
 	seen := make(map[uint32]bool, len(r.pairs)+len(additions))
@@ -177,7 +176,7 @@ func (r *Repairer) WithGlyphs(mappings []GlyphMapping) ([]byte, error) {
 	if len(extras) > 0 {
 		// merged 已按 code 升序，排序尾部新增项后归并，保持 merged 有序，
 		// 让 format12Subtable 跳过对整段的重复排序。
-		slices.SortFunc(extras, compareCMapPair)
+		sort.Sort(cmapPairs(extras))
 		merged = mergeSortedPairs(merged, extras)
 	}
 

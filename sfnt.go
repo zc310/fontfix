@@ -18,6 +18,12 @@ type sfntTable struct {
 	checksum uint32
 }
 
+type sfntTables []sfntTable
+
+func (t sfntTables) Len() int           { return len(t) }
+func (t sfntTables) Less(i, j int) bool { return t[i].tag < t[j].tag }
+func (t sfntTables) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
+
 type sfntRecord struct {
 	tag      string
 	data     []byte

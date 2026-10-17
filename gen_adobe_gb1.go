@@ -260,7 +260,10 @@ func render(packed []byte, supplement [][3]uint32, codes []uint32, texts []strin
 	encoded := base64.StdEncoding.EncodeToString(packed)
 	out.WriteString("const adobeGB1Packed = \"\" +\n")
 	for start := 0; start < len(encoded); start += chunk {
-		end := min(start+chunk, len(encoded))
+		end := start + chunk
+		if end > len(encoded) {
+			end = len(encoded)
+		}
 		separator := " +\n"
 		if end == len(encoded) {
 			separator = "\n"

@@ -3,7 +3,7 @@ package fontfix
 import (
 	"bytes"
 	"encoding/binary"
-	"slices"
+	"sort"
 )
 
 const packedGlyphBase rune = 0xF0000
@@ -60,7 +60,7 @@ func addPackedGlyphMap(data []byte, numGlyphs uint16) []byte {
 			tableOffsets = append(tableOffsets, subtable)
 		}
 	}
-	slices.Sort(tableOffsets)
+	sort.Ints(tableOffsets)
 	uniqueOffsets := tableOffsets[:0]
 	for _, offset := range tableOffsets {
 		if len(uniqueOffsets) == 0 || uniqueOffsets[len(uniqueOffsets)-1] != offset {
@@ -94,7 +94,7 @@ func addPackedGlyphMap(data []byte, numGlyphs uint16) []byte {
 			low = append(low, cmapPair{code: code, glyph: glyph})
 		}
 	}
-	slices.SortFunc(low, compareCMapPair)
+	sort.Sort(cmapPairs(low))
 
 	high := uint32(packedGlyphBase) + uint32(numGlyphs) - 1
 	packedRange := make([]cmapPair, 0, int(numGlyphs))
@@ -114,7 +114,7 @@ func addPackedGlyphMap(data []byte, numGlyphs uint16) []byte {
 		}
 	}
 	if len(extras) > 0 {
-		slices.SortFunc(extras, compareCMapPair)
+		sort.Sort(cmapPairs(extras))
 		packedRange = append(packedRange, extras...)
 	}
 	// low 的码位都小于私有区起点、packedRange 都大于等于它，直接拼接即有序。
@@ -173,6 +173,12 @@ type cmapPair struct {
 	glyph uint16
 }
 
+type cmapPairs []cmapPair
+
+func (p cmapPairs) Len() int           { return len(p) }
+func (p cmapPairs) Less(i, j int) bool { return compareCMapPair(p[i], p[j]) < 0 }
+func (p cmapPairs) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
 // cmapUnicodePairs 提取 cmap 表中 format 4 与 format 12 子表的码位映射，
 // 忽略 Macintosh 传统编码子表，因为它们的码位不等于 Unicode 标量值。
 func cmapUnicodePairs(cmap []byte) []cmapPair {
@@ -207,19 +213,10 @@ func format12Subtable(pairs []cmapPair) []byte {
 	if len(pairs) == 0 {
 		return nil
 	}
-	// 以 code 为首键、glyph 为次键构成全序：slices.SortFunc 不稳定，补上次键
+	// 以 code 为首键、glyph 为次键构成全序：sort.Sort 不稳定，补上次键
 	// 才能让相同 code 的输入得到确定输出。输入已有序（增量修补路径）时跳过排序。
-	cmp := func(a, b cmapPair) int {
-		if a.code != b.code {
-			if a.code < b.code {
-				return -1
-			}
-			return 1
-		}
-		return int(a.glyph) - int(b.glyph)
-	}
-	if !slices.IsSortedFunc(pairs, cmp) {
-		slices.SortFunc(pairs, cmp)
+	if !sort.IsSorted(cmapPairs(pairs)) {
+		sort.Sort(cmapPairs(pairs))
 	}
 	type group struct {
 		startCode uint32

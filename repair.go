@@ -8,8 +8,7 @@ package fontfix
 import (
 	"encoding/binary"
 	"fmt"
-	"slices"
-	"strings"
+	"sort"
 )
 
 // Repair adds a minimal OS/2 table when an SFNT font is missing it and adds a
@@ -100,7 +99,7 @@ func Repair(data []byte) ([]byte, error) {
 	if needsGlyphMap {
 		tables[cmapIndex].data = addPackedGlyphMap(tables[cmapIndex].data, maxGlyphs)
 	}
-	slices.SortFunc(tables, func(a, b sfntTable) int { return strings.Compare(a.tag, b.tag) })
+	sort.Sort(sfntTables(tables))
 
 	return rebuildSFNT(data[:4], tables), nil
 }

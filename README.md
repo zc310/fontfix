@@ -2,6 +2,9 @@
 
 Small helpers for repairing embedded TrueType/OpenType fonts.
 
+Requires Go 1.20 or later and uses only the standard library. CI builds and tests
+both Go 1.20 and the current stable Go release.
+
 ## Usage
 
 ```go

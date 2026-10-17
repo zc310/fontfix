@@ -109,7 +109,10 @@ func firstDiff(a, b []byte) int {
 		}
 	}
 	if len(a) != len(b) {
-		return min(len(a), len(b))
+		if len(a) < len(b) {
+			return len(a)
+		}
+		return len(b)
 	}
 	return -1
 }
