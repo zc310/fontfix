@@ -50,12 +50,13 @@ func TestAdobeGB1CIDToUnicodeOutOfRange(t *testing.T) {
 // U+FFFD.
 func TestAdobeGB1CoversWholeRange(t *testing.T) {
 	mapped := 0
-	for cid := 0; cid < adobeGB1CIDs; cid++ {
+	const cids, unmapped = 30284, 274
+	for cid := 0; cid < cids; cid++ {
 		if _, ok := AdobeGB1CIDToUnicode(cid); ok {
 			mapped++
 		}
 	}
-	if mapped < adobeGB1CIDs-adobeGB1Unmapped {
-		t.Errorf("only %d/%d CIDs resolve, want nearly all of them", mapped, adobeGB1CIDs)
+	if mapped < cids-unmapped {
+		t.Errorf("only %d/%d CIDs resolve, want nearly all of them", mapped, cids)
 	}
 }
